@@ -24,7 +24,7 @@ try:  # QRコードを作る部品（pip install segno）。入っていなく�
 except ImportError:
     segno = None
 
-st.set_page_config(page_title="やまぐちクチコミ帖", page_icon="🌿", layout="wide")
+st.set_page_config(page_title="やまぐちオススメマップ", page_icon="🌿", layout="wide")
 
 # ---------- 色と文字（白地に、くすんだ緑。ここを変えるとサイト全体の色が変わります） ----------
 ACCENT = "#4b7a62"  # アクセントの緑（NEWの札・順位のリボン・リンク）
@@ -259,7 +259,11 @@ header[data-testid="stHeader"] {{ background:rgba(255,255,255,.96) !important; b
 .st-key-menu-close button::after {{ transform:rotate(-45deg); }}
 @media (max-width:520px) {{
     .st-key-brand {{ left:4.3rem; transform:none; }}
-    .st-key-brand .stButton > button, .st-key-brand .stButton > button p {{ font-size:1rem; letter-spacing:.1em; }} }}
+    .st-key-brand .stButton > button, .st-key-brand .stButton > button p {{
+        font-size:clamp(.74rem, 3.55vw, 1rem); letter-spacing:.04em; white-space:nowrap; }} }}  /* 右のマークと重ならない大きさに */
+@media (max-width:640px) {{
+    .hero-en {{ font-size:.72rem; letter-spacing:.18em; }}
+    .hero-title {{ font-size:clamp(1.4rem, 6.2vw, 2.4rem); letter-spacing:.1em; }} }}  /* スマホでも、サイト名が1行に入る */
 
 /* 右端のマーク：お気に入り・検索・クチコミ（いつも表示。マークだけで、保存があるとハートに数字が付く） */
 .st-key-actions {{ position:fixed; top:.55rem; right:.9rem; z-index:999991; width:auto !important;
@@ -409,6 +413,17 @@ def _sb(method, path, **kw):
     return r
 
 
+def _sb_json(method, path, **kw):
+    """_sb と同じ。返事を JSON として読んで返す。読めなければ（URLまちがいなど）原因のヒント付きで StoreError"""
+    r = _sb(method, path, **kw)
+    try:
+        return r.json()
+    except ValueError:
+        kind = (getattr(r, "headers", None) or {}).get("content-type", "?")
+        raise StoreError(f"{method} {path}: 返事が JSON ではありません（status={r.status_code}, 種類={kind}）。"
+                         "Secrets の url が、Supabase の Project URL（https://〜.supabase.co）になっているか確認してください") from None
+
+
 def _tidy(df):
     for c in COLS:  # 古いCSVに無い列（住所・写真・交通手段など）は空で補う。古い score（星）の列は、使わないので次の保存で無くなる
         if c not in df.columns:
@@ -438,8 +453,10 @@ def _row(spot):  # データベースに送る1行（id は向こうで決まる
 def _fetch_spots():  # 10秒だけ覚えておく（ほかの人の新しい投稿は、10秒ほどで見える）
     rows, start = [], 0
     while True:
-        part = _sb("GET", "/rest/v1/spots", params={"select": ",".join(COLS), "order": "id.asc",
-                                                    "limit": 1000, "offset": start}).json()
+        part = _sb_json("GET", "/rest/v1/spots", params={"select": ",".join(COLS), "order": "id.asc",
+                                                         "limit": 1000, "offset": start})
+        if not isinstance(part, list):
+            raise StoreError("GET /rest/v1/spots: 返事の形がちがいます（spots の表が作られていない可能性があります）")
         rows += part
         if len(part) < 1000:
             return rows
@@ -448,7 +465,9 @@ def _fetch_spots():  # 10秒だけ覚えておく（ほかの人の新しい投�
 
 @st.cache_data(ttl=10, show_spinner=False)
 def _fetch_saves():
-    data = _sb("GET", "/rest/v1/saves", params={"select": "spot_id,n", "n": "gt.0"}).json()
+    data = _sb_json("GET", "/rest/v1/saves", params={"select": "spot_id,n", "n": "gt.0"})
+    if not isinstance(data, list):
+        raise StoreError("GET /rest/v1/saves: 返事の形がちがいます（saves の表が作られていない可能性があります）")
     return {str(x["spot_id"]): int(x["n"]) for x in data}
 
 
@@ -467,9 +486,12 @@ def load_spots():
 def add_spot(spot):
     """新しい投稿を保存し、番号(id)が決まった投稿を返す。失敗したら StoreError"""
     if REMOTE:
-        r = _sb("POST", "/rest/v1/spots", json=_row(spot), headers={"Prefer": "return=representation"})
+        data = _sb_json("POST", "/rest/v1/spots", json=_row(spot), headers={"Prefer": "return=representation"})
         _fetch_spots.clear()
-        return dict(spot, id=int(r.json()[0]["id"]))
+        try:
+            return dict(spot, id=int(data[0]["id"]))
+        except (TypeError, KeyError, IndexError, ValueError) as e:
+            raise StoreError("POST /rest/v1/spots: 保存した投稿の番号を受け取れませんでした") from e
     spot = dict(spot, id=max((s["id"] for s in S.spots), default=-1) + 1)
     S.spots.append(spot)
     save_spots(S.spots)
@@ -849,6 +871,8 @@ if REMOTE or "spots" not in S:  # 公開時は、画面を開くたびに読み�
     except StoreError as e:
         log_error(e)
         st.error("データをうまく読みこめませんでした。少し待ってから、ページを開き直してください。")
+        with st.expander("サイトを管理している方へ（エラーの内容）"):  # キーは含まれない。原因の目安だけ
+            st.code(str(e), language=None)
         st.stop()
 S.setdefault("favs", set())
 for k, v in dict(page="home", area="すべて", cat="すべて", tr="すべて", sort="popular", q="", post_n=0, flash="",
@@ -1247,8 +1271,8 @@ def owner_panel(spot):
 
 
 def hero():
-    st.markdown('<div class="hero"><div class="hero-en">YAMAGUCHI KUCHIKOMI-CHO</div>'
-                '<div class="hero-title">やまぐちクチコミ帖</div>'
+    st.markdown('<div class="hero"><div class="hero-en">YAMAGUCHI OSUSUME MAP</div>'
+                '<div class="hero-title">やまぐちオススメマップ</div>'
                 '<div class="hero-sub">山口の人が教える、山口のリアル。</div>'
                 f'<div class="hero-n">{len(S.spots)} REVIEWS</div></div>', unsafe_allow_html=True)
 
@@ -1283,7 +1307,7 @@ if S.menu:
 
 # ---------- 上のバー ----------
 with card_box("brand"):  # サイト名（押すとホームへ）
-    st.button("やまぐちクチコミ帖", key="t-home", on_click=go, args=("home",))
+    st.button("やまぐちオススメマップ", key="t-home", on_click=go, args=("home",))
 with card_box("actions"):  # 右端に、お気に入り・検索・クチコミのマークを常に表示（マークだけ）
     n_fav = len(S.favs)  # 保存があるとハートが塗りつぶされ、数字が付く
     st.button(str(n_fav) if n_fav else "Favorites", key="hd-fav-n" if n_fav else "hd-fav",
@@ -1365,7 +1389,7 @@ elif page == "favs":
         url = list_url(S.favs)
         st.caption("このリンクを開いた人に、あなたのお気に入りが一覧で見えます。リンクに入るのはスポットの番号だけで、"
                    "あなたの名前などは入りません。")
-        line = "https://line.me/R/msg/text/?" + quote(f"やまぐちクチコミ帖で、行きたい場所を集めました。\n{url}")
+        line = "https://line.me/R/msg/text/?" + quote(f"やまぐちオススメマップで、行きたい場所を集めました。\n{url}")
         try:
             st.link_button("LINEで送る", line)
         except AttributeError:  # 古いStreamlitでは、ふつうのリンクにする
@@ -1554,7 +1578,7 @@ elif page == "post":
 st.markdown(
     '<div class="foot"><div class="foot-sec"><div class="foot-h">Info</div>'
     '山口に暮らす人が、実際に行ってよかった場所を教えてくれる、山口のリアルな口コミサイトです。</div>'
-    '<div class="copy">© 2026 やまぐちクチコミ帖</div></div>', unsafe_allow_html=True)
+    '<div class="copy">© 2026 やまぐちオススメマップ</div></div>', unsafe_allow_html=True)
 
 # ---------- ページを移ったときは、画面を一番上に戻す ----------
 # Streamlit は、ページの中身が変わっても「下までスクロールした位置」を覚えたままなので、
