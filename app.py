@@ -9,6 +9,7 @@ import re
 import secrets
 import unicodedata
 import uuid
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote
 
@@ -17,6 +18,11 @@ import pydeck as pdk
 import requests
 import streamlit as st
 from PIL import Image, ImageOps
+
+try:  # QRコードを作る部品（pip install segno）。入っていなくても、サイトは動く（QRだけ出ない）
+    import segno
+except ImportError:
+    segno = None
 
 st.set_page_config(page_title="やまぐちクチコミ帖", page_icon="🌿", layout="wide")
 
@@ -84,6 +90,10 @@ div.stButton > button:active, div[data-testid="stFormSubmitButton"] > button:act
 [data-testid="stFileUploaderDropzone"] button:active {{ background:{TINT}; border-color:{DARK}; color:{DARK}; }}
 div.stButton > button:focus-visible, div[data-testid="stFormSubmitButton"] > button:focus-visible,
 [data-testid="stFileUploaderDropzone"] button:focus-visible {{ box-shadow:0 0 0 .2rem rgba(34,58,45,.25); }}
+[data-testid="stDownloadButton"] button, [data-testid="stLinkButton"] a {{
+    border-radius:999px; border:1px solid #c3cdc5; background:#fff; color:{INK}; letter-spacing:.1em; }}
+[data-testid="stDownloadButton"] button:hover, [data-testid="stLinkButton"] a:hover {{
+    background:#f5f8f5; border-color:{DARK}; color:{DARK}; }}
 div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div {{
     border-radius:0 !important; background:#fff !important; border:1px solid {LINE} !important; }}
 div[data-baseweb="input"]:focus-within, div[data-baseweb="textarea"]:focus-within,
@@ -114,7 +124,7 @@ div[data-baseweb="select"] > div:focus-within {{ border-color:{DARK} !important;
 /* ホームのランキング：横にスライド（スクロール）する。下に細いバーが出る */
 .st-key-rankhead {{ margin-top:2.6rem; }}
 .st-key-rankhead [data-testid="stHorizontalBlock"] {{ flex-wrap:nowrap !important; align-items:flex-end;
-    gap:1.8rem !important; }}
+    gap:1.5rem !important; }}
 /* Streamlit は文章の下に -16px の余白を付けるため、大きな見出しの下が切れて見えた。ここでは付けない */
 .st-key-rankhead [data-testid="stMarkdownContainer"] {{ margin-bottom:0 !important; }}
 .st-key-rankhead [data-testid="stColumn"], .st-key-rankhead [data-testid="column"] {{ flex:0 0 auto !important;
@@ -124,7 +134,7 @@ div[data-baseweb="select"] > div:focus-within {{ border-color:{DARK} !important;
 .st-key-rankhead .stButton > button {{ width:auto; border:none; border-radius:0; background:transparent; color:{MUTED};
     padding:.5rem 0; min-height:0; position:relative; }}
 .st-key-rankhead .stButton > button, .st-key-rankhead .stButton > button p {{ font-size:.95rem; font-weight:500;
-    letter-spacing:.2em; text-transform:uppercase; }}
+    letter-spacing:.16em; text-transform:uppercase; }}
 .st-key-rankhead .stButton > button::after {{ content:""; position:absolute; left:0; right:.2em; bottom:2px; height:1px;
     background:{DARK}; transform:scaleX(0); transform-origin:left; transition:transform .25s; }}
 .st-key-rankhead .stButton > button:hover::after, [class*="st-key-rt-on-"] .stButton > button::after {{
@@ -143,15 +153,38 @@ div[data-baseweb="select"] > div:focus-within {{ border-color:{DARK} !important;
 [class*="st-key-slide-"] [data-testid="stColumn"], [class*="st-key-slide-"] [data-testid="column"] {{
     flex:0 0 clamp(210px, 23vw, 290px) !important; width:auto !important; min-width:0 !important;
     scroll-snap-align:start; }}
-@media (max-width:640px) {{
-    .st-key-rankhead [data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; gap:.2rem .7rem !important; }}
+@media (max-width:900px) {{  /* 幅がせまいと、見出しを1行目に、切り替えを2行目に（はみ出さないように折り返す） */
+    .st-key-rankhead [data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; gap:.2rem 1.1rem !important; }}
     .st-key-rankhead [data-testid="stColumn"]:first-child, .st-key-rankhead [data-testid="column"]:first-child {{
-        flex:1 0 100% !important; }}
-    .st-key-rankhead .stButton > button, .st-key-rankhead .stButton > button p {{ font-size:.8rem; letter-spacing:.08em; }}
+        flex:1 0 100% !important; }} }}
+@media (max-width:640px) {{
+    .st-key-rankhead [data-testid="stHorizontalBlock"] {{ gap:.2rem .6rem !important; }}
+    .st-key-rankhead .stButton > button, .st-key-rankhead .stButton > button p {{ font-size:.78rem; letter-spacing:.05em; }}
     [class*="st-key-slide-"] [data-testid="stColumn"], [class*="st-key-slide-"] [data-testid="column"] {{
         flex:0 0 72vw !important; }} }}
+/* ホームの状況タグ（交通手段）：まん中に並ぶ、細い線の丸いタグ。押すと濃い緑になる */
+.st-key-trbar {{ margin:-.2rem 0 1.8rem; }}
+.st-key-trbar [data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; align-items:center;
+    justify-content:center; gap:.5rem .6rem !important; }}
+.st-key-trbar [data-testid="stColumn"], .st-key-trbar [data-testid="column"] {{ flex:0 0 auto !important;
+    width:auto !important; min-width:0 !important; }}
+.st-key-trbar [data-testid="stMarkdownContainer"] {{ margin-bottom:0 !important; }}
+.tr-label {{ font-family:{SERIF}; font-size:1rem; letter-spacing:.24em; text-transform:uppercase; color:{MUTED};
+    margin-right:.6rem; }}
+.st-key-trbar .stButton > button {{ width:auto; min-height:0; padding:.4rem 1.3rem; border:1px solid #c3cdc5;
+    background:#fff; color:{INK}; transition:background .2s, color .2s, border-color .2s; }}
+.st-key-trbar .stButton > button p {{ font-family:{SERIF} !important; font-size:1.02rem; font-weight:500;
+    letter-spacing:.16em; margin:0; }}
+.st-key-trbar .stButton > button:hover, .st-key-trbar .stButton > button:focus:not(:active),
+.st-key-trbar .stButton > button:active {{ background:{DARK}; border-color:{DARK}; color:#fff; }}
+@media (max-width:640px) {{
+    .st-key-trbar [data-testid="stColumn"]:first-child, .st-key-trbar [data-testid="column"]:first-child {{
+        flex:1 0 100% !important; }}
+    .tr-label {{ margin-right:0; text-align:center; }}
+    .st-key-trbar .stButton > button {{ padding:.4rem .85rem; }} }}  /* スマホでも4つが1行に入るように、少し細く */
 .saves {{ color:{ACCENT}; }}
 .meta {{ color:{MUTED}; font-size:.78rem; margin-top:.25rem; line-height:1.6; }}
+.meta.acc {{ margin:.05rem 0 .35rem; letter-spacing:.08em; }}
 .maplink {{ color:{ACCENT} !important; text-decoration:none; border-bottom:1px solid currentColor; }}
 .rv {{ color:#46524b; font-size:.84rem; line-height:1.7; display:-webkit-box; -webkit-line-clamp:3;
     -webkit-box-orient:vertical; overflow:hidden; margin:.2rem 0 .4rem; }}
@@ -292,9 +325,15 @@ header[data-testid="stHeader"] {{ background:rgba(255,255,255,.96) !important; b
 
 # ---------- データ（まずはサンプル。spots.csv ができたらそちらが本体になります） ----------
 AREAS = {"山口市": (34.186, 131.471)}  # 増やすときは「"宇部市": (緯度, 経度),」のように足す
-CATS = ["カフェ", "自然", "グルメ", "海", "温泉"]
-ICONS = {"カフェ": "☕", "自然": "🌿", "グルメ": "🍽️", "海": "🌊", "温泉": "♨️"}
-CAT_EN = {"カフェ": "Cafe", "自然": "Nature", "グルメ": "Gourmet", "海": "Sea", "温泉": "Onsen"}  # メニューの英語名
+CATS = ["食", "カフェ", "自然", "遊び", "歴史・アート", "その他"]
+ICONS = {"食": "🍽️", "カフェ": "☕", "自然": "🌿", "遊び": "🎡", "歴史・アート": "🏛️", "その他": "✨"}
+CAT_EN = {"食": "Food", "カフェ": "Cafe", "自然": "Nature", "遊び": "Play",
+          "歴史・アート": "Culture", "その他": "Other"}  # メニュー・ランキングの英語名（ランキングの切り替えに収まる短さ）
+# カテゴリ名を変えたときの引き継ぎ。古い spots.csv のカテゴリは、下の名前として読む（ここにも無い名前は「その他」になる）
+OLD_CATS = {"グルメ": "食", "海": "自然", "温泉": "その他"}
+# 状況タグ：交通手段（行き方）。投稿するときに選び、ホームのタグから絞り込める。増やすときは両方に足す
+TRANSPORTS = ["車", "電車", "バス", "徒歩"]
+TRANSPORT_EN = {"車": "Car", "電車": "Train", "バス": "Bus", "徒歩": "Walk"}
 AREA_EN = {"山口市": "Yamaguchi City"}  # 場所を増やしたら、ここに英語名も足す（なくても日本語のまま出ます）
 RANK_N = 10                       # ホームのランキングに出す件数（横にスライドします）
 RANK_TABS = ["すべて", *CATS]      # ランキングの切り替え（すべて ＋ カテゴリごと）
@@ -303,51 +342,168 @@ GENDERS = ["回答しない", "女性", "男性", "その他"]
 MAX_PHOTOS = 5
 MIN_CODE = 6   # 合言葉の最低文字数
 MAX_FAILS = 5  # 合言葉を間違えられる回数（1回の利用中）
-SAMPLE = [
-    ("サンプルカフェA", "山口市", "カフェ", 800, 4.9),
-    ("サンプルの森B", "山口市", "自然", 500, 4.8),
-    ("サンプル食堂C", "山口市", "グルメ", 1200, 4.7),
-    ("サンプル温泉D", "山口市", "温泉", 700, 4.6),
-    ("サンプルカフェE", "山口市", "カフェ", 900, 4.4),
-    ("サンプル公園F", "山口市", "自然", 0, 4.3),
-    ("サンプルの海辺G", "山口市", "海", 0, 4.2),
+MAX_LIST = 50  # お気に入りリストの共有リンクに入れられるスポットの数
+FAV_COOKIE = "kuchikomi_favs"  # この端末にお気に入りを残すための小さなメモの名前
+STORE_FAIL = "保存できませんでした。ネットの調子をみて、しばらくしてからもう一度試してください。"
+SAMPLE = [  # （名前, 場所, スポット, 予算, 交通手段）
+    ("サンプルカフェA", "山口市", "カフェ", 800, "徒歩,バス"),
+    ("サンプルの森B", "山口市", "自然", 500, "車"),
+    ("サンプル食堂C", "山口市", "食", 1200, "電車,徒歩"),
+    ("サンプル遊園地D", "山口市", "遊び", 700, "車,バス"),
+    ("サンプル美術館E", "山口市", "歴史・アート", 900, "徒歩"),
+    ("サンプル公園F", "山口市", "自然", 0, "車,徒歩"),
+    ("サンプルの道の駅G", "山口市", "その他", 0, "車"),
 ]
 
 
-def make_spot(i, name, area, cat, budget, score, review="ここにクチコミが入ります（サンプル）。",
+def make_spot(i, name, area, cat, budget, transport="", review="ここにクチコミが入ります（サンプル）。",
               address="", photo="", age="", gender="", edit_hash=""):
     lat, lon = AREAS[area]
-    return dict(id=i, name=name, area=area, category=cat, budget=budget, score=score,
+    return dict(id=i, name=name, area=area, category=cat, budget=budget, transport=transport,
                 review=review, address=address, photo=photo, age=age, gender=gender,
                 edit_hash=edit_hash, lat=lat + random.uniform(-.02, .02), lon=lon + random.uniform(-.02, .02))
 
 
-# ---------- CSVと写真の保存（app.py と同じフォルダの spots.csv / photos/） ----------
+# ---------- 保存の場所 ----------
+# ① 自分のパソコンで試すとき：app.py と同じフォルダの spots.csv / saves.json / photos/ に保存（設定はいりません）
+# ② みんなに公開するとき：Supabase（無料のデータベース）に保存。Streamlit の Secrets に [supabase] を書くと、
+#    自動でこちらに切り替わる。サーバーが眠っても、投稿や写真が消えない
 CSV = Path(__file__).parent / "spots.csv"
 PHOTO_DIR = Path(__file__).parent / "photos"
-COLS = ["id", "name", "area", "category", "budget", "score", "review",
+SAVES = Path(__file__).parent / "saves.json"
+BUCKET = "photos"  # Supabase の Storage に作る、写真の入れ物の名前
+COLS = ["id", "name", "area", "category", "budget", "transport", "review",
         "address", "photo", "age", "gender", "lat", "lon", "edit_hash"]
 
 
-def save_spots(spots):
+class StoreError(RuntimeError):
+    """Supabase とのやりとりに失敗したとき"""
+
+
+def log_error(e):  # 公開したサイトでは、Streamlit の「Manage app」のログに出る（画面には出さない）
+    print(f"[store] {e}", flush=True)
+
+
+def _remote():
+    try:
+        sb = st.secrets["supabase"]
+        url, key = str(sb["url"]).strip().rstrip("/"), str(sb["key"]).strip()
+        return (url, key) if url.startswith("http") and key else None
+    except Exception:  # Secrets が無い・書き方が違うときは、パソコン内の保存になる
+        return None
+
+
+REMOTE = _remote()
+
+
+def _sb(method, path, **kw):
+    url, key = REMOTE
+    headers = {"apikey": key, **kw.pop("headers", {})}
+    if key.startswith("eyJ"):  # 古い形式のキー（service_role）は Authorization にも入れる。sb_secret_ のキーは apikey だけでよい
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        r = requests.request(method, url + path, headers=headers, timeout=20, **kw)
+        r.raise_for_status()
+    except Exception as e:
+        raise StoreError(f"{method} {path}: {e}") from e
+    return r
+
+
+def _tidy(df):
+    for c in COLS:  # 古いCSVに無い列（住所・写真・交通手段など）は空で補う。古い score（星）の列は、使わないので次の保存で無くなる
+        if c not in df.columns:
+            df[c] = ""
+    df["category"] = df["category"].replace(OLD_CATS)  # 古いカテゴリ名（グルメ・海・温泉）→ 今の名前
+    df.loc[~df["category"].isin(CATS), "category"] = "その他"  # どれにも当てはまらない・空のときは「その他」
+    rows = df[COLS].fillna("").to_dict("records")
+    for r in rows:
+        r["id"] = int(r["id"])
+    return rows
+
+
+def _row(spot):  # データベースに送る1行（id は向こうで決まるので送らない）
+    out = {}
+    for k in COLS[1:]:
+        v = spot.get(k, "")
+        if k in ("lat", "lon"):
+            out[k] = float(v) if str(v).strip() not in ("", "nan", "None") else None
+        elif k == "budget":
+            out[k] = int(v or 0)
+        else:
+            out[k] = "" if v is None else str(v)
+    return out
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _fetch_spots():  # 10秒だけ覚えておく（ほかの人の新しい投稿は、10秒ほどで見える）
+    rows, start = [], 0
+    while True:
+        part = _sb("GET", "/rest/v1/spots", params={"select": ",".join(COLS), "order": "id.asc",
+                                                    "limit": 1000, "offset": start}).json()
+        rows += part
+        if len(part) < 1000:
+            return rows
+        start += 1000
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _fetch_saves():
+    data = _sb("GET", "/rest/v1/saves", params={"select": "spot_id,n", "n": "gt.0"}).json()
+    return {str(x["spot_id"]): int(x["n"]) for x in data}
+
+
+def save_spots(spots):  # パソコン内のCSVに、全部まとめて書く
     pd.DataFrame(spots, columns=COLS).to_csv(CSV, index=False, encoding="utf-8-sig")
 
 
 def load_spots():
+    if REMOTE:
+        return _tidy(pd.DataFrame(_fetch_spots(), columns=COLS))
     if not CSV.exists():  # 初回だけサンプルからCSVを作る
         save_spots([make_spot(i, *row) for i, row in enumerate(SAMPLE)])
-    df = pd.read_csv(CSV, encoding="utf-8-sig")
-    for c in COLS:  # 古いCSVに無い列（住所・写真など）は空で補う
-        if c not in df.columns:
-            df[c] = ""
-    return df[COLS].fillna("").to_dict("records")
+    return _tidy(pd.read_csv(CSV, encoding="utf-8-sig"))
 
 
-# 「何人が保存したか」の数だけを saves.json に残す。誰が保存したかは記録しない（匿名のまま）
-SAVES = Path(__file__).parent / "saves.json"
+def add_spot(spot):
+    """新しい投稿を保存し、番号(id)が決まった投稿を返す。失敗したら StoreError"""
+    if REMOTE:
+        r = _sb("POST", "/rest/v1/spots", json=_row(spot), headers={"Prefer": "return=representation"})
+        _fetch_spots.clear()
+        return dict(spot, id=int(r.json()[0]["id"]))
+    spot = dict(spot, id=max((s["id"] for s in S.spots), default=-1) + 1)
+    S.spots.append(spot)
+    save_spots(S.spots)
+    return spot
 
 
+def update_spot(spot):
+    """直した投稿を保存する（パソコン内では、S.spots の中の同じ投稿をそのまま書き出す）"""
+    if REMOTE:
+        _sb("PATCH", "/rest/v1/spots", params={"id": f"eq.{int(spot['id'])}"}, json=_row(spot))
+        _fetch_spots.clear()
+    else:
+        save_spots(S.spots)
+
+
+def delete_spot(spot):
+    sid = int(spot["id"])
+    if REMOTE:
+        _sb("DELETE", "/rest/v1/spots", params={"id": f"eq.{sid}"})
+        _fetch_spots.clear()
+    else:
+        S.spots = [x for x in S.spots if x["id"] != sid]
+        save_spots(S.spots)
+    clear_saves(sid)
+
+
+# 「何人が保存したか」の数だけを残す（パソコン内は saves.json、公開時は saves 表）。誰が保存したかは記録しない（匿名のまま）
 def load_saves():
+    if REMOTE:
+        try:
+            return _fetch_saves()
+        except StoreError as e:  # 数が出ないだけで、サイトは動かす
+            log_error(e)
+            return {}
     try:
         data = json.loads(SAVES.read_text(encoding="utf-8"))
         return {str(k): int(v) for k, v in data.items() if int(v) > 0}
@@ -362,6 +518,13 @@ def write_saves(counts):
 
 
 def change_saves(spot_id, delta):
+    if REMOTE:
+        try:
+            _sb("POST", "/rest/v1/rpc/change_saves", json={"p_id": int(spot_id), "p_delta": int(delta)})
+        except StoreError as e:  # 数が増えなかっただけ。保存そのものは、本人の端末に残る
+            log_error(e)
+        _fetch_saves.clear()
+        return
     counts = load_saves()
     n = max(0, counts.get(str(spot_id), 0) + delta)
     if n:
@@ -372,9 +535,34 @@ def change_saves(spot_id, delta):
 
 
 def clear_saves(spot_id):  # 投稿を消したとき、その数も消す（あとで同じ番号の投稿に引き継がれないように）
+    if REMOTE:
+        try:
+            _sb("DELETE", "/rest/v1/saves", params={"spot_id": f"eq.{int(spot_id)}"})
+        except StoreError as e:
+            log_error(e)
+        _fetch_saves.clear()
+        return
     counts = load_saves()
     if counts.pop(str(spot_id), None) is not None:
         write_saves(counts)
+
+
+# ---------- 写真（photo列には「a.jpg,b.jpg」のように、ファイル名がカンマ区切りで入っている） ----------
+def photo_names(spot_or_text):
+    text = spot_or_text["photo"] if isinstance(spot_or_text, dict) else spot_or_text
+    return [n.strip() for n in str(text).split(",") if n.strip()]
+
+
+def photo_url(name):  # 公開時：Supabase の Storage にある写真のアドレス
+    return f"{REMOTE[0]}/storage/v1/object/public/{BUCKET}/{quote(name)}"
+
+
+def photo_src(name):
+    """st.image に渡すもの。パソコン内ではファイルの場所、公開時はアドレス。写真が無いときは ''"""
+    if REMOTE:
+        return photo_url(name)
+    f = PHOTO_DIR / name
+    return str(f) if f.exists() else ""
 
 
 def save_photo(file):
@@ -382,9 +570,38 @@ def save_photo(file):
     img = ImageOps.exif_transpose(Image.open(file)).convert("RGB")
     img = ImageOps.fit(img, (800, 600))
     name = f"{uuid.uuid4().hex[:12]}.jpg"
-    PHOTO_DIR.mkdir(exist_ok=True)
-    img.save(PHOTO_DIR / name, "JPEG", quality=80)
+    if REMOTE:
+        buf = BytesIO()
+        img.save(buf, "JPEG", quality=80)
+        _sb("POST", f"/storage/v1/object/{BUCKET}/{name}", data=buf.getvalue(),
+            headers={"Content-Type": "image/jpeg"})
+    else:
+        PHOTO_DIR.mkdir(exist_ok=True)
+        img.save(PHOTO_DIR / name, "JPEG", quality=80)
     return name
+
+
+def save_photos(files):
+    """写真をまとめて保存して、ファイル名の一覧を返す。途中で失敗したら、保存済みの分は消して、エラーを上げる"""
+    done = []
+    try:
+        for f in files:
+            done.append(save_photo(f))
+    except Exception:
+        for n in done:
+            delete_photo(n)
+        raise
+    return done
+
+
+def delete_photo(name):
+    try:
+        if REMOTE:
+            _sb("DELETE", f"/storage/v1/object/{BUCKET}/{quote(name)}")
+        else:
+            (PHOTO_DIR / name).unlink(missing_ok=True)
+    except (StoreError, OSError) as e:
+        log_error(e)
 
 
 @st.cache_data
@@ -394,14 +611,16 @@ def photo_b64(name):
 
 
 def photo_html(names, overlay=""):
-    # photo列には「a.jpg,b.jpg」のように、写真のファイル名がカンマ区切りで入っています
     # overlay：写真の上に重ねるもの（順位のリボンなど）
-    files = [n.strip() for n in str(names).split(",") if n.strip()]
-    first = next((b for b in map(photo_b64, files) if b), "")
+    files = photo_names(names)
+    if REMOTE:  # 公開時：写真は Supabase から直接読み込む（このサーバーを通らないので軽い）
+        first = photo_url(files[0]) if files else ""
+    else:
+        first = next((f"data:image/jpeg;base64,{b}" for b in map(photo_b64, files) if b), "")
     if not first:
         return f'<div class="ph none">{overlay}NO PHOTO</div>'
     count = f'<span class="pcount">{len(files)} PHOTOS</span>' if len(files) > 1 else ""
-    return f'<div class="ph">{overlay}<img src="data:image/jpeg;base64,{first}" alt="">{count}</div>'
+    return f'<div class="ph">{overlay}<img src="{html.escape(first)}" alt="" loading="lazy">{count}</div>'
 
 
 # ---------- 場所の名前から、住所と位置を探す ----------
@@ -584,7 +803,11 @@ def relocate(spot, text):
         except Exception:
             pass
     spot.update(lat=lat, lon=lon, address=addr or (spot["address"] if m else text.strip()))
-    save_spots(S.spots)
+    try:
+        update_spot(spot)
+    except StoreError as e:
+        log_error(e)
+        return False, STORE_FAIL
     return True, note
 
 
@@ -603,13 +826,52 @@ def code_ok(code, stored):
 
 
 S = st.session_state
-if "spots" not in S:
-    S.spots = load_spots()
+
+
+def ids_from(text):
+    """「3.5.8」「3,5,8」のような文字から、番号の一覧を作る（重複なし・順番そのまま・MAX_LIST件まで）"""
+    if not isinstance(text, str):
+        return []
+    out = []
+    for n in re.findall(r"\d{1,9}", text):
+        if int(n) not in out:
+            out.append(int(n))
+    return out[:MAX_LIST]
+
+
+def fav_sig(favs):
+    return ".".join(str(i) for i in sorted(favs))
+
+
+if REMOTE or "spots" not in S:  # 公開時は、画面を開くたびに読み直す（ほかの人の新しい投稿も見える）
+    try:
+        S.spots = load_spots()
+    except StoreError as e:
+        log_error(e)
+        st.error("データをうまく読みこめませんでした。少し待ってから、ページを開き直してください。")
+        st.stop()
 S.setdefault("favs", set())
-for k, v in dict(page="home", area="すべて", cat="すべて", sort="score", q="", post_n=0, flash="",
+for k, v in dict(page="home", area="すべて", cat="すべて", tr="すべて", sort="popular", q="", post_n=0, flash="",
                   detail_id=None, back="home", saved={}, unlocked=set(), fails=0, menu=False,
-                  rank_tab="すべて").items():
+                  rank_tab="すべて", shared_ids=[]).items():
     S.setdefault(k, v)
+if "booted" not in S:  # 開いた直後の1回だけ
+    S.booted = True
+    try:  # この端末のお気に入りを、前回の続きから戻す（端末に残した cookie から読む）
+        S.favs = set(ids_from(st.context.cookies.get(FAV_COOKIE, "")))
+    except Exception:
+        pass
+    S.fav_sig = fav_sig(S.favs)
+    try:  # QRコードやリンクから開いたとき
+        listed, want = ids_from(st.query_params.get("list", "")), st.query_params.get("p", "")
+    except Exception:
+        listed, want = [], ""
+    if listed:  # ?list=3,5,8 → 友だちが共有してくれたお気に入りリスト
+        S.update(page="shared", shared_ids=listed)
+    elif want == "post":  # ?p=post → すぐにクチコミを書く画面
+        S.page = "post"
+_ids = {s["id"] for s in S.spots}
+S.favs = {i for i in S.favs if i in _ids}  # 消えた投稿は、お気に入りからも外す
 SAVE_COUNTS = load_saves()  # 画面を開くたびに読み直す（ほかの人の保存も反映される）
 
 
@@ -617,15 +879,14 @@ def saves_of(spot):
     return SAVE_COUNTS.get(str(spot["id"]), 0)
 
 
-def score_of(spot):  # 星の評価（1〜5）。数字になっていないときは 0 として扱う
-    try:
-        return max(0.0, min(5.0, float(spot["score"])))
-    except (TypeError, ValueError):
-        return 0.0
+def transports_of(spot):
+    """そのスポットの交通手段（車・電車・バス・徒歩）を、決まった順の一覧で返す。CSVの「車,徒歩」のような文字から読む"""
+    have = {t.strip() for t in str(spot.get("transport", "")).split(",")}
+    return [t for t in TRANSPORTS if t in have]
 
 
-def rank_key(spot):  # 評価が高い順。同じ評価なら保存された数が多い順、それも同じなら新しい順
-    return (score_of(spot), saves_of(spot), spot["id"])
+def rank_key(spot):  # 保存された数が多い順。同じ数なら新しい順
+    return (saves_of(spot), spot["id"])
 
 
 def ranking(spots, cat="すべて", n=RANK_N):
@@ -634,8 +895,8 @@ def ranking(spots, cat="すべて", n=RANK_N):
 
 
 # ---------- 動き ----------
-def go(page, area="すべて", cat="すべて", sort="score"):
-    S.update(page=page, area=area, cat=cat, sort=sort, menu=False,  # ページを移るときはメニューも閉じる
+def go(page, area="すべて", cat="すべて", sort="popular", tr="すべて"):
+    S.update(page=page, area=area, cat=cat, tr=tr, sort=sort, menu=False,  # ページを移るときはメニューも閉じる
              scroll_top=True)  # 前のページの下のほうを見ていても、新しいページは一番上から見せる
 
 
@@ -650,7 +911,7 @@ def close_menu():
 def open_detail(spot_id):
     if S.page != "detail":  # もどるときのために、今のページと絞り込みを覚えておく
         S.back = S.page
-        S.saved = dict(area=S.area, cat=S.cat, sort=S.sort)
+        S.saved = dict(area=S.area, cat=S.cat, tr=S.tr, sort=S.sort)
     S.update(detail_id=spot_id, page="detail", scroll_top=True)
 
 
@@ -678,10 +939,70 @@ def toggle_fav(spot_id):
         change_saves(spot_id, 1)
 
 
+def add_all_favs(ids):
+    """共有されたリストを、まとめて自分のお気に入りに入れる（すでに入っているものは、そのまま）"""
+    known = {s["id"] for s in S.spots}
+    new = [i for i in ids if i in known and i not in S.favs]
+    for i in new:
+        S.favs.add(i)
+        change_saves(i, 1)
+    S.flash = f"{len(new)}件を、お気に入りに入れました。" if new else "すべて、もうお気に入りに入っています。"
+
+
+# ---------- サイトのアドレスとQRコード ----------
+def site_url():
+    """このサイトのアドレス。Shareページで書きかえた値 → Secrets の site_url → 今開いているアドレス、の順に使う"""
+    if S.get("site_override"):
+        return S.site_override
+    try:
+        s = str(st.secrets["site_url"]).strip().rstrip("/")
+        if s.startswith("http"):
+            return s
+    except Exception:
+        pass
+    try:
+        h = st.context.headers
+        host = h.get("X-Forwarded-Host") or h.get("Host")
+        if host:
+            proto = (h.get("X-Forwarded-Proto") or ("http" if host.startswith(("localhost", "127.")) else "https"))
+            return f"{proto.split(',')[0].strip()}://{host.split(',')[0].strip()}"
+    except Exception:
+        pass
+    return "http://localhost:8501"
+
+
+def is_local_url(url):
+    return bool(re.match(r"https?://(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.)", url))
+
+
+@st.cache_data(show_spinner=False)
+def qr_png(url):
+    buf = BytesIO()
+    segno.make_qr(url, error="m").save(buf, kind="png", scale=10, border=2, dark=DARK)
+    return buf.getvalue()
+
+
+def qr_box(url, name):
+    """リンク（コピーできる）と、そのQRコード（画像で保存もできる）を出す"""
+    st.code(url, language=None)  # 右上のボタンでコピーできる
+    if segno is None:
+        st.caption("QRコードを出すには、ターミナルで「pip install segno」を実行して、もう一度起動してください。"
+                   "（公開したサイトでは、自動で入ります）")
+        return
+    png = qr_png(url)
+    st.image(png, width=190)
+    st.download_button("QRコードを保存（PNG）", png, file_name=f"{name}.png", mime="image/png", key=f"dl-{name}")
+
+
+def list_url(favs):
+    return f"{site_url()}/?list={','.join(str(i) for i in sorted(favs)[:MAX_LIST])}"
+
+
 def filtered():
     rows = [s for s in S.spots
-            if S.area in ("すべて", s["area"]) and S.cat in ("すべて", s["category"])]
-    return sorted(rows, key=rank_key if S.sort == "score" else (lambda s: s["id"]), reverse=True)
+            if S.area in ("すべて", s["area"]) and S.cat in ("すべて", s["category"])
+            and (S.tr == "すべて" or S.tr in transports_of(s))]
+    return sorted(rows, key=rank_key if S.sort == "popular" else (lambda s: s["id"]), reverse=True)
 
 
 def esc(text):
@@ -701,6 +1022,8 @@ def card_html(s, badge=""):
     who = " ".join(x for x in (s["age"], s["gender"]) if x)
     who = f'<div class="meta">投稿者：{esc(who)}</div>' if who else ""
     budget = int(s["budget"] or 0)
+    tr = transports_of(s)
+    access = f'<div class="meta acc">交通手段：{esc("・".join(tr))}</div>' if tr else ""
     ribbon = ""  # ランキングは、写真の左上に「No.1」のリボン
     new = ""     # NEW は、名前の上の札
     if badge.startswith("No."):
@@ -712,7 +1035,7 @@ def card_html(s, badge=""):
             + f'<div class="tags">{new}<span class="tag">{esc(s["area"])}</span><span class="tag">{esc(s["category"])}</span></div>'
             f'<div class="nm">{esc(s["name"])}</div>'
             f'<div class="price">¥{budget:,}<span class="saves" title="保存された数">♥ {saves_of(s)}</span></div>'
-            f'<div class="rv">{esc(s["review"])}</div>{addr}{link}{who}</div>')
+            f'{access}<div class="rv">{esc(s["review"])}</div>{addr}{link}{who}</div>')
 
 
 def card_box(key):
@@ -792,17 +1115,12 @@ def idx_of(options, value):
     return options.index(value) if value in options else 0
 
 
-def star_input(label, key):
-    """星の評価（1〜5）を選ぶ。まだ選んでいないときは None を返す"""
-    st.caption(label)
-    if hasattr(st, "feedback"):
-        try:
-            v = st.feedback("stars", key=key)  # 星を押すと 0〜4 が返る（押すまでは None）
-            return None if v is None else int(v) + 1
-        except Exception:  # フォームの中で使えない古い版など
-            pass
-    return st.radio(label, [1, 2, 3, 4, 5], index=None, horizontal=True, key=f"{key}-radio",
-                    format_func=lambda n: "★" * n, label_visibility="collapsed")
+def transport_input(key, current=()):
+    """交通手段（車・電車・バス・徒歩）を、チェックで選ぶ（複数OK）。選んだものを「車,徒歩」のような文字にして返す"""
+    st.caption("交通手段（行き方。あてはまるものをすべて選んでください）")
+    picked = [t for t, col in zip(TRANSPORTS, st.columns(len(TRANSPORTS)))
+              if col.checkbox(t, value=t in current, key=f"{key}-{t}")]
+    return ",".join(picked)
 
 
 def owner_panel(spot):
@@ -816,10 +1134,15 @@ def owner_panel(spot):
                     st.warning(f"合言葉は{MIN_CODE}文字以上にしてください。")
                 else:
                     spot["edit_hash"] = hash_code(code)
-                    save_spots(S.spots)
-                    S.unlocked.add(sid)
-                    S.flash = "合言葉を決めました。これで編集・削除できます。"
-                    st.rerun()
+                    try:
+                        update_spot(spot)
+                    except StoreError as e:
+                        log_error(e)
+                        st.error(STORE_FAIL)
+                    else:
+                        S.unlocked.add(sid)
+                        S.flash = "合言葉を決めました。これで編集・削除できます。"
+                        st.rerun()
         return
     if sid not in S.unlocked:
         with st.expander("✏️ 投稿者の方はこちら（編集・削除）"):
@@ -832,7 +1155,7 @@ def owner_panel(spot):
                     st.rerun()
         return
 
-    files = [f for f in (n.strip() for n in str(spot["photo"]).split(",")) if f and (PHOTO_DIR / f).exists()]
+    files = [f for f in photo_names(spot) if photo_src(f)]
     with st.expander("✏️ この投稿を編集する", expanded=True):
         with st.form(f"edit-{sid}"):
             name = st.text_input("スポット名", value=str(spot["name"]), key=f"e-name-{sid}")
@@ -841,12 +1164,12 @@ def owner_panel(spot):
             budget = st.number_input("かかった予算（円）", 0, 100000, min(int(spot["budget"] or 0), 100000), 100,
                                      key=f"e-budget-{sid}")
             review = st.text_area("クチコミ", value=str(spot["review"]), key=f"e-review-{sid}")
-            new_stars = star_input(f"星の評価（今は {score_of(spot):.1f}。変えるときだけ星を押してください）", f"e-stars-{sid}")
+            transport = transport_input(f"e-tr-{sid}", transports_of(spot))
             drop = []
             if files:
                 st.caption("今の写真（消したい写真にチェック）")
                 for f, col in zip(files, st.columns(len(files))):
-                    col.image(str(PHOTO_DIR / f))
+                    col.image(photo_src(f))
                     if col.checkbox("消す", key=f"e-drop-{sid}-{f}"):
                         drop.append(f)
             up = st.file_uploader(f"写真を足す（全部で{MAX_PHOTOS}枚まで）", type=["jpg", "jpeg", "png"],
@@ -863,28 +1186,35 @@ def owner_panel(spot):
                 st.warning(f"写真は全部で{MAX_PHOTOS}枚までです。")
             elif not (name.strip() and review.strip()):
                 st.warning("スポット名とクチコミは空にできません。")
+            elif not transport:
+                st.warning("交通手段を1つ以上選んでください。")
             else:
-                added = [save_photo(f) for f in up]
-                for f in drop:
-                    (PHOTO_DIR / f).unlink(missing_ok=True)
-                moved = False
-                if address.strip() and address.strip() != str(spot["address"]).strip():
-                    try:  # 住所を直したときは、番地まで特定できれば、ピンも住所の位置に合わせる
-                        hit = geocode_gsi(address)
-                    except Exception:
-                        hit = None
-                    if hit and hit["exact"]:
-                        spot.update(lat=hit["lat"], lon=hit["lon"])
-                        moved = True
-                spot.update(name=name.strip(), address=address.strip(), category=cat, budget=int(budget),
-                            review=review, photo=",".join(keep + added),
-                            age="" if age == "回答しない" else age,
-                            gender="" if gender == "回答しない" else gender)
-                if new_stars:
-                    spot["score"] = float(new_stars)
-                save_spots(S.spots)
-                S.flash = "変更を保存しました。" + ("住所に合わせて、ピンの位置も直しました。" if moved else "")
-                st.rerun()
+                added, moved = [], False
+                try:
+                    added = save_photos(up)
+                    if address.strip() and address.strip() != str(spot["address"]).strip():
+                        try:  # 住所を直したときは、番地まで特定できれば、ピンも住所の位置に合わせる
+                            hit = geocode_gsi(address)
+                        except Exception:
+                            hit = None
+                        if hit and hit["exact"]:
+                            spot.update(lat=hit["lat"], lon=hit["lon"])
+                            moved = True
+                    spot.update(name=name.strip(), address=address.strip(), category=cat, budget=int(budget),
+                                transport=transport, review=review, photo=",".join(keep + added),
+                                age="" if age == "回答しない" else age,
+                                gender="" if gender == "回答しない" else gender)
+                    update_spot(spot)
+                except (StoreError, OSError) as e:  # 保存できなかったら、足した写真も取り消す
+                    log_error(e)
+                    for n in added:
+                        delete_photo(n)
+                    st.error(STORE_FAIL)
+                else:
+                    for f in drop:  # 投稿の保存に成功してから、消す写真を消す
+                        delete_photo(f)
+                    S.flash = "変更を保存しました。" + ("住所に合わせて、ピンの位置も直しました。" if moved else "")
+                    st.rerun()
 
     with st.expander("📍 ピンの位置を直す"):
         st.caption("住所、または「緯度, 経度」を入れてください。Googleマップで場所を右クリックすると、緯度・経度が出ます。")
@@ -901,22 +1231,25 @@ def owner_panel(spot):
     with st.expander("🗑 この投稿を削除する"):
         sure = st.checkbox("本当に削除する（元に戻せません）", key=f"delchk-{sid}")
         if st.button("削除する", key=f"delbtn-{sid}", disabled=not sure):
-            for f in files:
-                (PHOTO_DIR / f).unlink(missing_ok=True)
-            S.spots = [x for x in S.spots if x["id"] != sid]
-            S.favs.discard(sid)
-            clear_saves(sid)
-            S.unlocked.discard(sid)
-            save_spots(S.spots)
-            S.flash = "投稿を削除しました。"
-            S.update(page=S.back, scroll_top=True, **S.saved)
-            st.rerun()
+            try:
+                delete_spot(spot)
+            except (StoreError, OSError) as e:
+                log_error(e)
+                st.error(STORE_FAIL)
+            else:
+                for f in files:
+                    delete_photo(f)
+                S.favs.discard(sid)
+                S.unlocked.discard(sid)
+                S.flash = "投稿を削除しました。"
+                S.update(page=S.back, scroll_top=True, **S.saved)
+                st.rerun()
 
 
 def hero():
     st.markdown('<div class="hero"><div class="hero-en">YAMAGUCHI KUCHIKOMI-CHO</div>'
                 '<div class="hero-title">やまぐちクチコミ帖</div>'
-                '<div class="hero-sub">山口の大学生が、ほんとうに行ってよかった場所だけ。</div>'
+                '<div class="hero-sub">山口の人が教える、山口のリアル。</div>'
                 f'<div class="hero-n">{len(S.spots)} REVIEWS</div></div>', unsafe_allow_html=True)
 
 
@@ -946,6 +1279,7 @@ if S.menu:
         st.button("Ranking", key="menu-rank", on_click=go, args=("home",))  # ランキングはホームにある
         st.button("New", key="menu-new", on_click=go, args=("new",))
         st.button("My posts", key="menu-mine", on_click=go, args=("mine",))
+        st.button("Share", key="menu-share", on_click=go, args=("share",))  # 投稿用のQRコードとリンク
 
 # ---------- 上のバー ----------
 with card_box("brand"):  # サイト名（押すとホームへ）
@@ -966,6 +1300,16 @@ page = S.page
 
 if page == "home":
     hero()
+    if not S.spots:  # 公開した直後など、まだ1件も投稿が無いとき
+        st.info("まだクチコミがありません。最初の1件を、あなたが書いてみませんか？")
+        st.button("Write a review", key="empty-post", on_click=go, args=("post",))
+    # 状況タグ（交通手段）：押すと「さがす」ページが、その交通手段で絞り込まれて開く
+    with card_box("trbar"):
+        for col, t in zip(st.columns(len(TRANSPORTS) + 1), [None, *TRANSPORTS]):
+            if t is None:
+                col.markdown('<div class="tr-label">Getting there</div>', unsafe_allow_html=True)
+            else:
+                col.button(TRANSPORT_EN.get(t, t), key=f"tr-{t}", on_click=go, args=("browse",), kwargs={"tr": t})
     show_map(S.spots, "map-home")
     # ランキング：左に見出し、右に「すべて／カテゴリ」の切り替え。その下に、横にスライドする10位まで
     with card_box("rankhead"):
@@ -992,8 +1336,9 @@ elif page == "browse":
     c1, c2, c3 = st.columns([1, 3, 1.5])
     c1.selectbox("場所", ["すべて", *AREAS], key="area")
     c2.radio("スポット", ["すべて", *CATS], key="cat", horizontal=True)
-    c3.radio("並び順", ["score", "new"], key="sort", horizontal=True,
-             format_func={"score": "人気順", "new": "新着順"}.get)
+    c3.radio("並び順", ["popular", "new"], key="sort", horizontal=True,
+             format_func={"popular": "人気順", "new": "新着順"}.get)
+    st.radio("交通手段", ["すべて", *TRANSPORTS], key="tr", horizontal=True)
     rows = filtered()
     show_map(rows, "map-browse")
     cards(rows, "browse")
@@ -1015,8 +1360,56 @@ elif page == "favs":
     if rows:
         show_map(rows, "map-favs")
         cards(rows, "fav")
+        st.divider()
+        section("SHARE THIS LIST", "お気に入りリストを、友だちに送る")
+        url = list_url(S.favs)
+        st.caption("このリンクを開いた人に、あなたのお気に入りが一覧で見えます。リンクに入るのはスポットの番号だけで、"
+                   "あなたの名前などは入りません。")
+        line = "https://line.me/R/msg/text/?" + quote(f"やまぐちクチコミ帖で、行きたい場所を集めました。\n{url}")
+        try:
+            st.link_button("LINEで送る", line)
+        except AttributeError:  # 古いStreamlitでは、ふつうのリンクにする
+            st.markdown(f"[LINEで送る]({line})")
+        if is_local_url(url):
+            st.caption("※ いまは自分のパソコンの中のアドレスです。サイトを公開したあとに作ったリンクを、友だちに送ってください。")
+        qr_box(url, "favorites")
+        st.caption("お気に入りは、この端末（このブラウザ）にも残ります。ほかの端末でも見たいときは、このリンクを開いてください。")
     else:
         st.info("まだ保存したスポットがありません。気になる場所の「♡ 保存」を押してみてください。")
+
+elif page == "shared":
+    section("SHARED LIST", "友だちが送ってくれたお気に入り")
+    known = {s["id"] for s in S.spots}
+    ids = [i for i in S.shared_ids if i in known]
+    rows = sorted((s for s in S.spots if s["id"] in ids), key=lambda s: ids.index(s["id"]))  # 送られた順のまま
+    if rows:
+        st.caption(f"{len(rows)}件のスポットです。気に入ったら、まとめて自分のお気に入りに入れられます。")
+        st.button("♥ まとめて自分のお気に入りに入れる", key="shared-addall", on_click=add_all_favs, args=(ids,))
+        show_map(rows, "map-shared")
+        cards(rows, "shared")
+    else:
+        st.info("共有されたスポットが見つかりませんでした。投稿が消えたか、リンクが途中で切れているかもしれません。")
+        st.button("ホームへ", key="shared-home", on_click=go, args=("home",))
+
+elif page == "share":
+    section("SHARE", "QRコードとリンク")
+    st.caption("ポスターやチラシ、SNSのプロフィールにQRコードを貼ると、読み取った人がすぐにクチコミを書けます。")
+    typed = st.text_input("このサイトのURL（公開したURLに書きかえてください）", value=site_url(), key="site_in")
+    typed = typed.strip().rstrip("/")
+    S.site_override = typed if typed.startswith("http") else ""
+    base = site_url()
+    if is_local_url(base):
+        st.warning("いまは自分のパソコンの中のアドレスです。このままのQRコードは、スマホでは開けません。"
+                   "サイトを公開して、公開されたURL（https://〜）を上の欄に入れると、使えるQRコードになります。")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**クチコミを書くQR**")
+        st.caption("読み取ると、すぐ投稿画面が開きます。")
+        qr_box(f"{base}/?p=post", "post-qr")
+    with c2:
+        st.markdown("**サイトのQR**")
+        st.caption("読み取ると、ホームが開きます。")
+        qr_box(base, "site-qr")
 
 elif page == "detail":
     spot = next((x for x in S.spots if x["id"] == S.detail_id), None)
@@ -1027,10 +1420,9 @@ elif page == "detail":
         st.subheader(spot["name"])
         left, right = st.columns([3, 2])
         with left:
-            shown = [f for f in (PHOTO_DIR / n.strip() for n in str(spot["photo"]).split(",") if n.strip())
-                     if f.exists()]
-            for i, f in enumerate(shown, 1):
-                st.image(str(f), caption=f"{i} / {len(shown)}")
+            shown = [p for p in map(photo_src, photo_names(spot)) if p]
+            for i, p in enumerate(shown, 1):
+                st.image(p, caption=f"{i} / {len(shown)}")
             if not shown:
                 st.info("写真はまだありません。")
         with right:
@@ -1039,6 +1431,7 @@ elif page == "detail":
             st.markdown(
                 '<div>'
                 f'<span class="tag">{esc(spot["area"])}</span><span class="tag">{esc(spot["category"])}</span>'
+                + (f'<div class="meta">交通手段：{esc("・".join(transports_of(spot)))}</div>' if transports_of(spot) else "")
                 + (f'<div class="meta">📍 {esc(spot["address"])}</div>' if spot["address"] else "")
                 + f'<div class="meta"><a href="{link}" target="_blank" rel="noopener" class="maplink">'
                   '🗺 Googleマップで開く</a></div>'
@@ -1099,7 +1492,7 @@ elif page == "post":
                                 value=pick["address"] if pick else "", key=f"p_addr{n}-{name}-{idx}")
         cat = st.selectbox("スポット", CATS, key=f"p_cat{n}")
         budget = st.number_input("かかった予算（円）", 0, 100000, 1000, 100, key=f"p_budget{n}")
-        rating = star_input("星の評価（必ず選んでください）", f"p_stars{n}")
+        transport = transport_input(f"p_tr{n}")
         review = st.text_area("クチコミ", key=f"p_review{n}")
         up = st.file_uploader(f"写真（{MAX_PHOTOS}枚まで・jpg/png）", type=["jpg", "jpeg", "png"],
                               accept_multiple_files=True, key=f"p_up{n}")
@@ -1117,45 +1510,50 @@ elif page == "post":
             st.warning(f"写真は{MAX_PHOTOS}枚までです。選び直してください。")
         elif not (name and review.strip()):
             st.warning("スポット名とクチコミを入力してください。")
-        elif not rating:
-            st.warning("星の評価を選んでください。")
+        elif not transport:
+            st.warning("交通手段（車・電車・バス・徒歩）を1つ以上選んでください。")
         elif len(code) < MIN_CODE or code != code2:
             st.warning(f"合言葉は{MIN_CODE}文字以上で、同じものを2回入れてください。")
         else:
-            photo = ",".join(save_photo(f) for f in up)
-            new_id = max((s["id"] for s in S.spots), default=-1) + 1
             addr = address.strip()
-            spot = make_spot(
-                new_id, name, list(AREAS)[0], cat, int(budget), float(rating), review, addr, photo,
-                "" if age == "回答しない" else age, "" if gender == "回答しない" else gender, hash_code(code))
-            placed = bool(pick)
-            warn = ""
-            if pick:  # えらんだ場所のピンを置く
-                spot.update(lat=pick["lat"], lon=pick["lon"])
-            if addr and not (pick and addr == pick["address"]):
-                # 住所を自分で書いた・直したときは、その住所の位置も調べる。番地まで特定できたら、そちらが正確
-                try:
-                    hit = geocode_gsi(addr)
-                except Exception:
-                    hit = None
-                if hit and (hit["exact"] or not pick):
-                    if pick and meters(pick["lat"], pick["lon"], hit["lat"], hit["lon"]) > 1500:
-                        warn = "住所の位置と、えらんだ場所が1km以上離れています。詳細ページでピンの位置を確かめてください。"
-                    spot.update(lat=hit["lat"], lon=hit["lon"])
-                    placed = True
-            S.spots.append(spot)
-            save_spots(S.spots)
-            S.unlocked.add(new_id)
-            S.flash = ("投稿しました。Newに表示され、spots.csv にも保存されました。"
-                       "あとから「自分の投稿」で、合言葉を入れると確認・編集できます。" + warn
-                       + ("" if placed else "ピンの位置は山口市のあたりに仮置きしました。詳細ページの「ピンの位置を直す」で直せます。"))
-            S.post_n += 1  # 入力欄を空にする
-            st.rerun()
+            placed, warn, added = bool(pick), "", []
+            try:
+                added = save_photos(up)
+                spot = make_spot(  # 番号(id)は、保存するときに決まる
+                    0, name, list(AREAS)[0], cat, int(budget), transport, review, addr, ",".join(added),
+                    "" if age == "回答しない" else age, "" if gender == "回答しない" else gender, hash_code(code))
+                if pick:  # えらんだ場所のピンを置く
+                    spot.update(lat=pick["lat"], lon=pick["lon"])
+                if addr and not (pick and addr == pick["address"]):
+                    # 住所を自分で書いた・直したときは、その住所の位置も調べる。番地まで特定できたら、そちらが正確
+                    try:
+                        hit = geocode_gsi(addr)
+                    except Exception:
+                        hit = None
+                    if hit and (hit["exact"] or not pick):
+                        if pick and meters(pick["lat"], pick["lon"], hit["lat"], hit["lon"]) > 1500:
+                            warn = "住所の位置と、えらんだ場所が1km以上離れています。詳細ページでピンの位置を確かめてください。"
+                        spot.update(lat=hit["lat"], lon=hit["lon"])
+                        placed = True
+                spot = add_spot(spot)
+            except (StoreError, OSError) as e:  # 保存できなかったら、入力はそのまま残して、写真だけ取り消す
+                log_error(e)
+                for n in added:
+                    delete_photo(n)
+                st.error(STORE_FAIL + "入力した内容は、そのまま残してあります。")
+            else:
+                S.unlocked.add(spot["id"])
+                S.flash = (("投稿しました。みんなが見られる New に表示されます。" if REMOTE
+                            else "投稿しました。Newに表示され、spots.csv にも保存されました。")
+                           + "あとから「自分の投稿」で、合言葉を入れると確認・編集できます。" + warn
+                           + ("" if placed else "ピンの位置は山口市のあたりに仮置きしました。詳細ページの「ピンの位置を直す」で直せます。"))
+                S.post_n += 1  # 入力欄を空にする
+                st.rerun()
 
 # ---------- 下のエリア ----------
 st.markdown(
     '<div class="foot"><div class="foot-sec"><div class="foot-h">Info</div>'
-    '山口県内の大学生が、実際に行ってよかった場所を紹介するサイトです。</div>'
+    '山口に暮らす人が、実際に行ってよかった場所を教えてくれる、山口のリアルな口コミサイトです。</div>'
     '<div class="copy">© 2026 やまぐちクチコミ帖</div></div>', unsafe_allow_html=True)
 
 # ---------- ページを移ったときは、画面を一番上に戻す ----------
@@ -1171,4 +1569,18 @@ if S.get("scroll_top"):
             "if(e)e.scrollTo(0,0);}window.parent.scrollTo(0,0);};"
             f"up();setTimeout(up,150);setTimeout(up,500);/*{S.scroll_n}*/</script>", height=0)
     except Exception:  # 使えない版では、何もしない（下のほうが表示されるだけ）
+        pass
+
+# ---------- お気に入りを、この端末に残す ----------
+# 変わったときだけ、ブラウザに小さなメモ（cookie）を書く。次に開いたとき、冒頭で読んで戻す。
+# 名前や個人の情報は入らず、スポットの番号だけ。ブラウザのデータを消すと、いっしょに消える
+sig = fav_sig(S.favs)
+if sig != S.get("fav_sig", sig):
+    S.fav_sig = sig
+    try:
+        st.components.v1.html(
+            "<script>try{const p=window.parent;"
+            f"p.document.cookie='{FAV_COOKIE}={sig}; max-age={31536000 if sig else 0}; path=/; SameSite=Lax'"
+            "+(p.location.protocol==='https:'?'; Secure':'');}catch(e){}</script>", height=0)
+    except Exception:
         pass
