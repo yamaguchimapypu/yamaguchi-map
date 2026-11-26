@@ -41,7 +41,11 @@ SANS = "'Cormorant Garamond','Noto Sans JP','Hiragino Sans','Yu Gothic',sans-ser
 HIDE_STREAMLIT_PARTS = True  # 公開用の見た目（Streamlitの標準の部品を隠す）。元に戻したいときは False
 CHROME_CSS = ("#MainMenu, footer, .stDeployButton, [data-testid='stMainMenu'], [data-testid='stAppDeployButton'],"
               " [data-testid='stDecoration'], [data-testid='stSidebarCollapsedControl'],"
-              " [data-testid='stExpandSidebarButton'] { display:none !important; }") if HIDE_STREAMLIT_PARTS else ""
+              " [data-testid='stExpandSidebarButton'],"
+              # Streamlit Cloud が右上に出す Share・☆・✎・GitHub のボタン（このアプリのマークと重なる）
+              # （白い帯＝ stHeader は、このアプリのマークの後ろの背景に使うので残す）
+              " [data-testid='stToolbar'], [data-testid='stToolbarActions'], [data-testid='stAppToolbar'],"
+              " [data-testid='stStatusWidget'] { display:none !important; }") if HIDE_STREAMLIT_PARTS else ""
 # メニューの動き（秒）。もっとゆっくりにしたいときは数字を大きくしてください
 MENU_SLIDE = 0.7    # メニューが横から出てくる時間
 MENU_START = 0.3    # 最初の文字が出はじめるまでの時間
